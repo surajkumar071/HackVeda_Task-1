@@ -1,90 +1,101 @@
-from crawler import get_websites
-from email_extractor import extract_emails
+import time
+
+from email_extractor import extract_emails, is_valid_email, normalize_email
 from smtp_mail_sender import send_email
-import re
 
 
-def load_seed_urls(file_path="seed_urls.txt"):
-    urls = []
-    try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            for line in file:
-                value = line.strip()
-                if not value or value.startswith("#"):
-                    continue
-                urls.append(value)
-    except FileNotFoundError:
-        return []
-    return urls
+def ask_yes_no(prompt, default=True):
+    suffix = "Y/n" if default else "y/N"
+    value = input(f"{prompt} ({suffix}): ").strip().lower()
 
-
-def normalize_url(url):
-    value = url.strip()
     if not value:
-        return value
-    if not value.startswith(("http://", "https://")):
-        value = "https://" + value
-    return value
+        return default
+    return value in {"y", "yes"}
 
-keyword = input("Enter business keyword: ")
 
-websites = get_websites(keyword)
-print(f"Found {len(websites)} website(s) from search")
+def ask_delay_seconds():
+    value = input("Delay between emails in seconds (default 1): ").strip()
+    if not value:
+        return 1.0
 
-if not websites:
-    seed_urls = load_seed_urls()
-    if seed_urls:
-        websites = [normalize_url(url) for url in seed_urls if normalize_url(url)]
-        print(f"Using {len(websites)} website(s) from seed_urls.txt")
-
-if not websites:
     try:
-        manual = input(
-            "No websites found from search. Enter website URLs separated by comma (or press Enter to skip): "
-        ).strip()
-    except EOFError:
-        manual = ""
-    if manual:
-        websites = [normalize_url(url) for url in manual.split(",") if normalize_url(url)]
-        print(f"Using {len(websites)} manually provided website(s)")
+        delay = float(value)
+        if delay < 0:
+            return 1.0
+        return delay
+    except ValueError:
+        return 1.0
+
+url = input("Enter website URL: ").strip()
+
+# Validate URL format
+if not url.startswith(('http://', 'https://')):
+    url = 'https://' + url
 
 all_emails = set()
+invalid_count = 0
 
 print("\nExtracting Emails...\n")
 
-for site in websites:
-    emails = extract_emails(site)
-    print(f"{site} -> {len(emails)} email(s)")
+emails = extract_emails(url)
 
+if emails:
+    print(f"Found {len(emails)} email(s) on {url}")
     for email in emails:
-        clean_email = email.strip().lower()
-        if re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", clean_email):
-            all_emails.add(clean_email)
+        cleaned_email = normalize_email(email)
+        if is_valid_email(cleaned_email):
+            all_emails.add(cleaned_email)
+        else:
+            invalid_count += 1
+else:
+    print(f"No emails found on {url}")
 
-# Save emails (both filenames for convenience)
-sorted_emails = sorted(all_emails)
-
-with open("emails.txt", "w", encoding="utf-8") as file:
-    for email in sorted_emails:
-        file.write(email + "\n")
-
-with open("email.txt", "w", encoding="utf-8") as file:
-    for email in sorted_emails:
-        file.write(email + "\n")
-
-print(f"\n{len(sorted_emails)} email(s) saved in emails.txt and email.txt")
-
-if not sorted_emails:
-    print("No emails were found for the current keyword/results.")
-    print("Try a more specific keyword like: 'Ashu bakery Mumbai' or 'Ashu digital marketing Delhi'.")
+# Save emails
+if all_emails:
+    with open("email.txt", "w") as file:
+        for email in sorted(all_emails):
+            file.write(email + "\n")
+    print(f"\n{len(all_emails)} unique email(s) saved in email.txt")
+else:
+    print("\nNo emails extracted. email.txt is empty.")
 
 # Send emails
-print("\nSending Emails...\n")
+if all_emails:
+    dry_run = ask_yes_no("Dry run only (show recipients, don't send)?", default=True)
+    delay_seconds = ask_delay_seconds()
 
-if not sorted_emails:
-    print("Skipping email sending because no recipients were found.")
+    print("\nSending Emails...\n")
 
-for email in all_emails:
-    send_email(email)
+    sent_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for index, email in enumerate(sorted(all_emails), start=1):
+        if dry_run:
+            print(f"[DRY RUN] {index}. {email}")
+            skipped_count += 1
+            continue
+
+        result = send_email(email)
+        status = (result or {}).get("status")
+        if status == "sent":
+            sent_count += 1
+        elif status == "skipped":
+            skipped_count += 1
+        else:
+            failed_count += 1
+
+        if delay_seconds > 0 and index < len(all_emails):
+            time.sleep(delay_seconds)
+
+    print("\nRun Summary")
+    print(f"- Extracted (raw): {len(emails)}")
+    print(f"- Valid unique recipients: {len(all_emails)}")
+    print(f"- Invalid skipped before save/send: {invalid_count}")
+    print(f"- Sent: {sent_count}")
+    print(f"- Failed: {failed_count}")
+    print(f"- Dry-run/Skipped: {skipped_count}")
+else:
+    print("\nNo emails to send.")
 
 print("\nProcess Completed ✅")
